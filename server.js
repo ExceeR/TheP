@@ -1,16 +1,16 @@
-// server.js
 const express = require('express');
 const { WebSocketServer } = require('ws');
 const cors = require('cors');
 const path = require('path');
 
+// Create Express app
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Enable CORS for all routes
+// Middleware
 app.use(cors());
 app.use(express.json());
-app.use(express.static('public'));
+app.use(express.static(path.join(__dirname, 'public')));
 
 // Store connected clients
 const clients = new Map();
@@ -29,11 +29,10 @@ wss.on('connection', (ws) => {
 
     ws.on('message', (message) => {
         try {
-            const data = JSON.parse(message);
+            const data = JSON.parse(message.toString());
             
             switch (data.type) {
                 case 'register':
-                    // Generate client ID using timestamp and random number
                     clientId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
                     clients.set(clientId, {
                         ws,
@@ -43,10 +42,15 @@ wss.on('connection', (ws) => {
                         lastSeen: new Date()
                     });
                     console.log(`Client registered: ${clientId}`);
+                    
+                    // Send confirmation back to client
+                    ws.send(JSON.stringify({
+                        type: 'registered',
+                        data: { clientId }
+                    }));
                     break;
 
                 case 'status':
-                    // Handle status updates from clients
                     console.log(`Status from ${clientId}:`, data.data);
                     break;
             }
@@ -62,7 +66,7 @@ wss.on('connection', (ws) => {
         }
     });
 
-    // Send periodic pings to keep connection alive
+    // Keepalive ping
     const pingInterval = setInterval(() => {
         if (ws.readyState === ws.OPEN) {
             ws.ping();
@@ -72,7 +76,7 @@ wss.on('connection', (ws) => {
     ws.on('close', () => clearInterval(pingInterval));
 });
 
-// REST API endpoints
+// API Routes
 app.get('/api/clients', (req, res) => {
     const clientList = Array.from(clients.entries()).map(([id, client]) => ({
         id,
@@ -103,7 +107,7 @@ app.post('/api/install', async (req, res) => {
     }
 });
 
-// Serve frontend
+// Default route
 app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
