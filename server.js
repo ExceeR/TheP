@@ -1,77 +1,61 @@
-// server.js
 const express = require('express');
-const WebSocket = require('ws');
-const http = require('http');
+const { WebSocketServer } = require('ws');
 const cors = require('cors');
-const uuid = require('uuid');
+const path = require('path');
+const http = require('http');
 
+// Create Express app
 const app = express();
-const server = http.createServer(app);
-const wss = new WebSocket.Server({ server });
+const PORT = process.env.PORT || 3000;
 
+// Middleware
 app.use(cors());
 app.use(express.json());
+app.use(express.static(path.join(__dirname, 'public')));
 
 // Store connected clients
 const clients = new Map();
 
-// REST API endpoints
-app.post('/api/install-pkg', async (req, res) => {
-    const { clientId, pkgUrl } = req.body;
-    
-    if (!clients.has(clientId)) {
-        return res.status(404).json({ error: 'Client not found' });
-    }
+// Create HTTP server
+const server = http.createServer(app);
 
-    const client = clients.get(clientId);
-    client.ws.send(JSON.stringify({
-        type: 'install',
-        data: { pkgUrl }
-    }));
-
-    res.json({ message: 'Installation command sent' });
+// Create WebSocket server attached to the HTTP server
+const wss = new WebSocketServer({ 
+    server,
+    path: "/ws"  // Explicitly set the WebSocket path
 });
 
-app.get('/api/clients', (req, res) => {
-    const clientList = Array.from(clients.values()).map(client => ({
-        id: client.id,
-        name: client.name,
-        lastSeen: client.lastSeen
-    }));
-    res.json(clientList);
-});
-
-// WebSocket handling
+// WebSocket connection handling
 wss.on('connection', (ws) => {
-    const clientId = uuid.v4();
-    console.log(`New client connected: ${clientId}`);
-
-    // Store client information
-    clients.set(clientId, {
-        id: clientId,
-        ws,
-        name: 'Unknown Client',
-        lastSeen: new Date()
-    });
-
-    // Send client their ID
-    ws.send(JSON.stringify({
-        type: 'registration',
-        data: { clientId }
-    }));
+    let clientId = null;
+    console.log('New client connected');
 
     ws.on('message', (message) => {
         try {
-            const data = JSON.parse(message);
+            const data = JSON.parse(message.toString());
+            console.log('Received:', data);
             
             switch (data.type) {
                 case 'register':
-                    const client = clients.get(clientId);
-                    client.name = data.data.name;
+                    clientId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+                    clients.set(clientId, {
+                        ws,
+                        name: data.data.name,
+                        ps4_ip: data.data.ps4_ip,
+                        connected: true,
+                        lastSeen: new Date()
+                    });
+                    console.log(`Client registered: ${clientId}`);
+                    
+                    // Send confirmation back to client
+                    ws.send(JSON.stringify({
+                        type: 'registered',
+                        data: { clientId }
+                    }));
                     break;
+
                 case 'status':
-                    // Handle installation status updates
-                    console.log(`Status update from ${clientId}:`, data.data);
+                    console.log(`Status from ${clientId}:`, data.data);
                     break;
             }
         } catch (error) {
@@ -80,49 +64,60 @@ wss.on('connection', (ws) => {
     });
 
     ws.on('close', () => {
-        console.log(`Client disconnected: ${clientId}`);
-        clients.delete(clientId);
+        if (clientId) {
+            clients.delete(clientId);
+            console.log(`Client disconnected: ${clientId}`);
+        }
     });
 
-    // Ping to keep connection alive
+    // Keepalive ping
     const pingInterval = setInterval(() => {
-        if (ws.readyState === WebSocket.OPEN) {
+        if (ws.readyState === ws.OPEN) {
             ws.ping();
-            const client = clients.get(clientId);
-            if (client) {
-                client.lastSeen = new Date();
-            }
         }
     }, 30000);
 
     ws.on('close', () => clearInterval(pingInterval));
 });
 
-const PORT = process.env.PORT || 3000;
+// API Routes
+app.get('/api/clients', (req, res) => {
+    const clientList = Array.from(clients.entries()).map(([id, client]) => ({
+        id,
+        name: client.name,
+        ps4_ip: client.ps4_ip,
+        lastSeen: client.lastSeen
+    }));
+    res.json(clientList);
+});
+
+app.post('/api/install', async (req, res) => {
+    const { clientId, pkgUrl } = req.body;
+    
+    if (!clients.has(clientId)) {
+        return res.status(404).json({ error: 'Client not found' });
+    }
+
+    const client = clients.get(clientId);
+    
+    try {
+        client.ws.send(JSON.stringify({
+            type: 'install',
+            data: { url: pkgUrl }
+        }));
+        res.json({ message: 'Installation request sent' });
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to send installation request' });
+    }
+});
+
+// Default route
+app.get('/', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+// Start server
 server.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
-});
-
-// Package management system
-const packages = new Map();
-
-app.post('/api/packages', (req, res) => {
-    const { name, url, size, version } = req.body;
-    const pkgId = uuid.v4();
-    
-    packages.set(pkgId, {
-        id: pkgId,
-        name,
-        url,
-        size,
-        version,
-        addedAt: new Date()
-    });
-
-    res.json({ id: pkgId });
-});
-
-app.get('/api/packages', (req, res) => {
-    const pkgList = Array.from(packages.values());
-    res.json(pkgList);
+    console.log(`WebSocket server running on path /ws`);
 });
