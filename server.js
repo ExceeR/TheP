@@ -1,3 +1,4 @@
+// server.js
 const express = require('express');
 const { WebSocketServer } = require('ws');
 const cors = require('cors');
@@ -9,7 +10,10 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Middleware
-app.use(cors());
+app.use(cors({
+    origin: '*',  // Allow all origins
+    methods: ['GET', 'POST']
+}));
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
@@ -19,16 +23,26 @@ const clients = new Map();
 // Create HTTP server
 const server = http.createServer(app);
 
-// Create WebSocket server attached to the HTTP server
-const wss = new WebSocketServer({ 
+// Create WebSocket server
+const wss = new WebSocketServer({
     server,
-    path: "/ws"  // Explicitly set the WebSocket path
+    path: "/ws",
+    // Disable SSL/TLS requirements
+    perMessageDeflate: false,
+    clientTracking: true,
 });
 
 // WebSocket connection handling
-wss.on('connection', (ws) => {
+wss.on('connection', (ws, req) => {
     let clientId = null;
     console.log('New client connected');
+
+    // Keep connection alive
+    const interval = setInterval(() => {
+        if (ws.readyState === ws.OPEN) {
+            ws.ping();
+        }
+    }, 30000);
 
     ws.on('message', (message) => {
         try {
@@ -56,6 +70,7 @@ wss.on('connection', (ws) => {
 
                 case 'status':
                     console.log(`Status from ${clientId}:`, data.data);
+                    // Broadcast status to all connected clients if needed
                     break;
             }
         } catch (error) {
@@ -68,16 +83,24 @@ wss.on('connection', (ws) => {
             clients.delete(clientId);
             console.log(`Client disconnected: ${clientId}`);
         }
+        clearInterval(interval);
     });
 
-    // Keepalive ping
-    const pingInterval = setInterval(() => {
-        if (ws.readyState === ws.OPEN) {
-            ws.ping();
+    ws.on('error', (error) => {
+        console.error('WebSocket error:', error);
+        if (clientId) {
+            clients.delete(clientId);
         }
-    }, 30000);
+    });
 
-    ws.on('close', () => clearInterval(pingInterval));
+    ws.on('pong', () => {
+        if (clientId) {
+            const client = clients.get(clientId);
+            if (client) {
+                client.lastSeen = new Date();
+            }
+        }
+    });
 });
 
 // API Routes
@@ -105,19 +128,55 @@ app.post('/api/install', async (req, res) => {
             type: 'install',
             data: { url: pkgUrl }
         }));
-        res.json({ message: 'Installation request sent' });
+        res.json({ message: 'Installation request sent', success: true });
     } catch (error) {
-        res.status(500).json({ error: 'Failed to send installation request' });
+        console.error('Failed to send installation request:', error);
+        res.status(500).json({ error: 'Failed to send installation request', success: false });
     }
 });
+
+// Periodic cleanup of disconnected clients
+setInterval(() => {
+    const now = new Date();
+    for (const [clientId, client] of clients.entries()) {
+        if (now - client.lastSeen > 60000) { // Remove after 1 minute of inactivity
+            console.log(`Removing inactive client: ${clientId}`);
+            clients.delete(clientId);
+        }
+    }
+}, 30000);
 
 // Default route
 app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
+// Health check endpoint
+app.get('/health', (req, res) => {
+    res.json({
+        status: 'ok',
+        clients: clients.size,
+        uptime: process.uptime()
+    });
+});
+
+// Error handling
+app.use((err, req, res, next) => {
+    console.error(err.stack);
+    res.status(500).json({ error: 'Something broke!', details: err.message });
+});
+
 // Start server
 server.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-    console.log(`WebSocket server running on path /ws`);
+    console.log(`Server running on http://localhost:${PORT}`);
+    console.log(`WebSocket server running on ws://localhost:${PORT}/ws`);
+});
+
+// Handle process termination
+process.on('SIGTERM', () => {
+    console.log('SIGTERM received. Closing server...');
+    server.close(() => {
+        console.log('Server closed');
+        process.exit(0);
+    });
 });
